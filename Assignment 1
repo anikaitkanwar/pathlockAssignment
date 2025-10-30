@@ -1,0 +1,437 @@
+Assignment 1 : 
+
+Backend (C# .NET 8)
+A super simple Web API .
+Model and controller logic in two files (TaskItem.cs, TasksController.cs).
+Minimal setup for Program.cs.
+Frontend (React + TypeScript)
+Main app component that fetches, adds, updates, and deletes tasks from the backend.
+React Hooks for state.
+
+
+Folder structure:
+backend/
+  Controllers/
+    TasksController.cs
+  Models/
+    TaskItem.cs
+  Program.cs
+  Startup.cs
+
+backend/Models/TaskItem.cs
+namespace backend.Models
+{
+    public class TaskItem
+    {
+        public Guid Id { get; set; }
+        public string Description { get; set; }
+        public bool IsCompleted { get; set; }
+    }
+}
+
+backend/Controllers/TasksController.cs
+using Microsoft.AspNetCore.Mvc;
+using backend.Models;
+
+namespace backend.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class TasksController : ControllerBase
+    {
+        private static List<TaskItem> tasks = new();
+
+        [HttpGet]
+        public ActionResult<IEnumerable<TaskItem>> GetTasks()
+        {
+            return Ok(tasks);
+        }
+
+        [HttpPost]
+        public ActionResult<TaskItem> AddTask([FromBody] TaskItem newTask)
+        {
+            newTask.Id = Guid.NewGuid();
+            tasks.Add(newTask);
+            return CreatedAtAction(nameof(GetTasks), new { id = newTask.Id }, newTask);
+        }
+
+        [HttpPut("{id}")]
+        public IActionResult UpdateTask(Guid id, [FromBody] TaskItem updated)
+        {
+            var task = tasks.FirstOrDefault(t => t.Id == id);
+            if (task == null) return NotFound();
+            task.Description = updated.Description;
+            task.IsCompleted = updated.IsCompleted;
+            return NoContent();
+        }
+
+        [HttpDelete("{id}")]
+        public IActionResult DeleteTask(Guid id)
+        {
+            var task = tasks.FirstOrDefault(t => t.Id == id);
+            if (task == null) return NotFound();
+            tasks.Remove(task);
+            return NoContent();
+        }
+    }
+}
+
+backend/Program.cs
+
+var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddControllers();
+
+var app = builder.Build();
+
+app.UseHttpsRedirection();
+app.UseRouting();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+
+backend/Startup.cs
+
+public class Startup
+{
+    public void ConfigureServices(IServiceCollection services)
+    {
+        services.AddControllers();
+    }
+
+    public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
+    {
+        if (env.IsDevelopment())
+        {
+            app.UseDeveloperExceptionPage();
+        }
+
+        app.UseHttpsRedirection();
+        app.UseRouting();
+        app.UseAuthorization();
+        app.UseEndpoints(endpoints =>
+        {
+            endpoints.MapControllers();
+        });
+    }
+}
+
+
+Backend Running
+
+  dotnet build
+  dotnet run
+  ```
+
+---
+
+## 2. **Frontend: React + TypeScript**
+
+**Folder structure:**  
+```
+frontend/
+  src/
+    App.tsx
+    index.tsx
+    types.ts
+  package.json
+  tsconfig.json
+```
+
+---
+
+### **frontend/src/types.ts**
+```typescript
+export type Task = {
+  id: string;
+  description: string;
+  isCompleted: boolean;
+};
+```
+
+---
+
+### **frontend/src/App.tsx**
+```tsx
+import React, { useEffect, useState } from "react";
+import { Task } from "./types";
+
+const API_URL = "https://localhost:5001/api/tasks"; // Update port if needed
+
+function App() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [desc, setDesc] = useState("");
+
+  useEffect(() => {
+    fetch(API_URL)
+      .then(res => res.json())
+      .then(data => setTasks(data));
+  }, []);
+
+  const addTask = async () => {
+    if (!desc.trim()) return;
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description: desc, isCompleted: false }),
+    });
+    const newTask: Task = await res.json();
+    setTasks([...tasks, newTask]);
+    setDesc("");
+  };
+
+  const toggleTask = async (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    await fetch(`${API_URL}/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...task, isCompleted: !task.isCompleted }),
+    });
+    setTasks(tasks.map(t => t.id === id ? { ...t, isCompleted: !t.isCompleted } : t));
+  };
+
+  const deleteTask = async (id: string) => {
+    await fetch(`${API_URL}/${id}`, { method: "DELETE" });
+    setTasks(tasks.filter(t => t.id !== id));
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "40px auto", fontFamily: "sans-serif" }}>
+      <h2>Task Manager</h2>
+      <div>
+        <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="New task" />
+        <button onClick={addTask}>Add</button>
+      </div>
+      <ul style={{ listStyle: "none", padding: 0 }}>
+        {tasks.map(task => (
+          <li key={task.id} style={{ margin: "8px 0", display: "flex", alignItems: "center" }}>
+            <input type="checkbox" checked={task.isCompleted} onChange={() => toggleTask(task.id)} />
+            <span style={{ marginLeft: 8, textDecoration: task.isCompleted ? "line-through" : "" }}>
+              {task.description}
+            </span>
+            <button onClick={() => deleteTask(task.id)} style={{ marginLeft: "auto" }}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default App;
+```
+
+---
+
+### **frontend/src/index.tsx**
+```tsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+```
+
+---
+
+### **frontend/package.json**
+```json
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  }
+}
+```
+
+
+---
+
+### **frontend/tsconfig.json**
+```json
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
+```
+
+---
+
+### **Run the frontend**
+- In terminal inside `/frontend`:
+  ```sh
+  npm install
+  npm start
+  ```
+2. Frontend: React + TypeScript
+
+frontend/
+  src/
+    App.tsx
+    index.tsx
+    types.ts
+  package.json
+  tsconfig.json
+
+export type Task = {
+  id: string;
+  description: string;
+  isCompleted: boolean;
+};
+
+frontend/src/App.tsx
+import React, { useEffect, useState } from "react";
+import { Task } from "./types";
+
+const API_URL = "https://localhost:5001/api/tasks"; // Update port if needed
+
+function App() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [desc, setDesc] = useState("");
+
+  useEffect(() => {
+    fetch(API_URL)
+      .then(res => res.json())
+      .then(data => setTasks(data));
+  }, []);
+
+  const addTask = async () => {
+    if (!desc.trim()) return;
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ description: desc, isCompleted: false }),
+    });
+    const newTask: Task = await res.json();
+    setTasks([...tasks, newTask]);
+    setDesc("");
+  };
+
+  const toggleTask = async (id: string) => {
+    const task = tasks.find(t => t.id === id);
+    if (!task) return;
+    await fetch(`${API_URL}/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...task, isCompleted: !task.isCompleted }),
+    });
+    setTasks(tasks.map(t => t.id === id ? { ...t, isCompleted: !t.isCompleted } : t));
+  };
+
+  const deleteTask = async (id: string) => {
+    await fetch(`${API_URL}/${id}`, { method: "DELETE" });
+    setTasks(tasks.filter(t => t.id !== id));
+  };
+
+  return (
+    <div style={{ maxWidth: 480, margin: "40px auto", fontFamily: "sans-serif" }}>
+      <h2>Task Manager</h2>
+      <div>
+        <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="New task" />
+        <button onClick={addTask}>Add</button>
+      </div>
+      <ul style={{ listStyle: "none", padding: 0 }}>
+        {tasks.map(task => (
+          <li key={task.id} style={{ margin: "8px 0", display: "flex", alignItems: "center" }}>
+            <input type="checkbox" checked={task.isCompleted} onChange={() => toggleTask(task.id)} />
+            <span style={{ marginLeft: 8, textDecoration: task.isCompleted ? "line-through" : "" }}>
+              {task.description}
+            </span>
+            <button onClick={() => deleteTask(task.id)} style={{ marginLeft: "auto" }}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+export default App;
+
+frontend/src/index.tsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+frontend/package.json
+
+{
+  "name": "frontend",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.0.0",
+    "react-dom": "^18.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  }
+}
+
+frontend/tsconfig.json
+
+{
+  "compilerOptions": {
+    "target": "es5",
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "strict": true,
+    "forceConsistentCasingInFileNames": true,
+    "noFallthroughCasesInSwitch": true,
+    "module": "esnext",
+    "moduleResolution": "node",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx"
+  },
+  "include": ["src"]
+}
+
+Running the Frontend   
+npm install
+  npm start
+
+
+
+
