@@ -312,64 +312,242 @@ frontend/src/App.tsx
 import React, { useEffect, useState } from "react";
 import { Task } from "./types";
 
-const API_URL = "https://localhost:5001/api/tasks"; // Update port if needed
+const API_URL = "https://localhost:5001/api/tasks";
 
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [desc, setDesc] = useState("");
+  const [description, setDescription] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
 
   useEffect(() => {
-    fetch(API_URL)
-      .then(res => res.json())
-      .then(data => setTasks(data));
+    fetchTasks();
   }, []);
 
+  const fetchTasks = async () => {
+    try {
+      setLoading(true);
+      setError("");
+      const response = await fetch(API_URL);
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch tasks: ${response.status}`);
+      }
+      
+      const data: Task[] = await response.json();
+      setTasks(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "An error occurred");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const addTask = async () => {
-    if (!desc.trim()) return;
-    const res = await fetch(API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ description: desc, isCompleted: false }),
-    });
-    const newTask: Task = await res.json();
-    setTasks([...tasks, newTask]);
-    setDesc("");
+    const trimmedDescription = description.trim();
+    if (!trimmedDescription) {
+      setError("Please enter a task description");
+      return;
+    }
+
+    try {
+      setError("");
+      const response = await fetch(API_URL, {
+        method: "POST",
+        headers: { 
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ 
+          description: trimmedDescription, 
+          isCompleted: false 
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.text();
+        throw new Error(errorData || "Failed to add task");
+      }
+
+      const newTask: Task = await response.json();
+      setTasks(prev => [...prev, newTask]);
+      setDescription("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add task");
+    }
   };
 
   const toggleTask = async (id: string) => {
-    const task = tasks.find(t => t.id === id);
-    if (!task) return;
-    await fetch(`${API_URL}/${id}`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...task, isCompleted: !task.isCompleted }),
-    });
-    setTasks(tasks.map(t => t.id === id ? { ...t, isCompleted: !t.isCompleted } : t));
+    try {
+      setError("");
+      const task = tasks.find(t => t.id === id);
+      if (!task) return;
+
+      const response = await fetch(`${API_URL}/${id}`, {
+        method: "PUT",
+        headers: { 
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ 
+          ...task, 
+          isCompleted: !task.isCompleted 
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to update task");
+      }
+
+      setTasks(prev => 
+        prev.map(t => 
+          t.id === id ? { ...t, isCompleted: !t.isCompleted } : t
+        )
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update task");
+    }
   };
 
   const deleteTask = async (id: string) => {
-    await fetch(`${API_URL}/${id}`, { method: "DELETE" });
-    setTasks(tasks.filter(t => t.id !== id));
+    try {
+      setError("");
+      const response = await fetch(`${API_URL}/${id}`, { 
+        method: "DELETE" 
+      });
+
+      if (!response.ok) {
+        throw new Error("Failed to delete task");
+      }
+
+      setTasks(prev => prev.filter(t => t.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete task");
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      addTask();
+    }
   };
 
   return (
-    <div style={{ maxWidth: 480, margin: "40px auto", fontFamily: "sans-serif" }}>
-      <h2>Task Manager</h2>
-      <div>
-        <input value={desc} onChange={e => setDesc(e.target.value)} placeholder="New task" />
-        <button onClick={addTask}>Add</button>
+    <div style={{ maxWidth: 600, margin: "40px auto", padding: "0 20px", fontFamily: "sans-serif" }}>
+      <h2 style={{ textAlign: "center", color: "#333" }}>Task Manager</h2>
+      
+      {/* Error Display */}
+      {error && (
+        <div style={{ 
+          color: "#d32f2f", 
+          backgroundColor: "#ffebee", 
+          padding: "12px", 
+          borderRadius: "4px", 
+          marginBottom: "16px",
+          border: "1px solid #f44336"
+        }}>
+          {error}
+        </div>
+      )}
+
+      {/* Add Task Form */}
+      <div style={{ display: "flex", gap: "8px", marginBottom: "24px" }}>
+        <input 
+          value={description}
+          onChange={e => setDescription(e.target.value)}
+          onKeyPress={handleKeyPress}
+          placeholder="Enter a new task..."
+          style={{ 
+            flex: 1, 
+            padding: "12px", 
+            border: "1px solid #ddd", 
+            borderRadius: "4px",
+            fontSize: "16px"
+          }}
+          disabled={loading}
+        />
+        <button 
+          onClick={addTask}
+          disabled={loading || !description.trim()}
+          style={{
+            padding: "12px 24px",
+            backgroundColor: "#1976d2",
+            color: "white",
+            border: "none",
+            borderRadius: "4px",
+            cursor: "pointer",
+            fontSize: "16px"
+          }}
+        >
+          {loading ? "Adding..." : "Add Task"}
+        </button>
       </div>
-      <ul style={{ listStyle: "none", padding: 0 }}>
-        {tasks.map(task => (
-          <li key={task.id} style={{ margin: "8px 0", display: "flex", alignItems: "center" }}>
-            <input type="checkbox" checked={task.isCompleted} onChange={() => toggleTask(task.id)} />
-            <span style={{ marginLeft: 8, textDecoration: task.isCompleted ? "line-through" : "" }}>
-              {task.description}
-            </span>
-            <button onClick={() => deleteTask(task.id)} style={{ marginLeft: "auto" }}>Delete</button>
-          </li>
-        ))}
-      </ul>
+
+      {/* Loading State */}
+      {loading && tasks.length === 0 && (
+        <div style={{ textAlign: "center", padding: "20px" }}>
+          Loading tasks...
+        </div>
+      )}
+
+      {/* Tasks List */}
+      {tasks.length === 0 && !loading ? (
+        <div style={{ textAlign: "center", color: "#666", padding: "40px" }}>
+          No tasks yet. Add a task to get started!
+        </div>
+      ) : (
+        <ul style={{ listStyle: "none", padding: 0 }}>
+          {tasks.map(task => (
+            <li 
+              key={task.id} 
+              style={{ 
+                display: "flex", 
+                alignItems: "center", 
+                padding: "12px",
+                margin: "8px 0",
+                backgroundColor: "#fafafa",
+                borderRadius: "4px",
+                border: "1px solid #e0e0e0"
+              }}
+            >
+              <input 
+                type="checkbox" 
+                checked={task.isCompleted}
+                onChange={() => toggleTask(task.id)}
+                style={{ 
+                  marginRight: "12px",
+                  transform: "scale(1.2)"
+                }}
+                disabled={loading}
+              />
+              <span 
+                style={{ 
+                  flex: 1,
+                  marginLeft: 8, 
+                  textDecoration: task.isCompleted ? "line-through" : "none",
+                  color: task.isCompleted ? "#666" : "#333",
+                  fontSize: "16px"
+                }}
+              >
+                {task.description}
+              </span>
+              <button 
+                onClick={() => deleteTask(task.id)}
+                disabled={loading}
+                style={{
+                  padding: "8px 16px",
+                  backgroundColor: "#d32f2f",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "14px"
+                }}
+              >
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
