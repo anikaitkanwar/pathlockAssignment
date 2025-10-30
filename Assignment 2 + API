@@ -1,0 +1,773 @@
+Backend: .NET 8 Web API, JWT auth, in‑memory storage, projects and tasks CRUD, plus a simple scheduler endpoint.
+Frontend: React + TypeScript (Vite), login/register, dashboard, project details with task management, JWT stored in localStorage, axios client, React Router.
+
+
+Backend.cs
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
+using backend.Services;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddControllers();
+builder.Services.AddSingleton<AppStore>();
+builder.Services.AddSingleton<JwtTokenService>();
+
+var jwtKey = builder.Configuration["Jwt:Key"] ?? "dev-secret-key-change";
+var keyBytes = Encoding.UTF8.GetBytes(jwtKey);
+
+builder.Services.AddAuthentication(o =>
+{
+    o.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    o.DefaultChallengeScheme = JwtBearerDefaults.AuthenticationScheme;
+}).AddJwtBearer(o =>
+{
+    o.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = false,
+        ValidateAudience = false,
+        ValidateIssuerSigningKey = true,
+        IssuerSigningKey = new SymmetricSecurityKey(keyBytes),
+        ClockSkew = TimeSpan.Zero
+    };
+});
+
+builder.Services.AddAuthorization();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+builder.Services.AddCors(o =>
+{
+    o.AddDefaultPolicy(p => p.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod());
+});
+
+var app = builder.Build();
+
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.UseHttpsRedirection();
+app.UseCors();
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
+-----
+backend/appsettings.json
+
+{
+  "Logging": { "LogLevel": { "Default": "Information", "Microsoft.AspNetCore": "Warning" } },
+  "Jwt": { "Key": "dev-secret-key-change" },
+  "AllowedHosts": "*"
+}
+
+backend/Models/User.cs
+
+using System.ComponentModel.DataAnnotations;
+
+namespace backend.Models
+{
+    public class User
+    {
+        public Guid Id { get; set; } = Guid.NewGuid();
+        [Required, MinLength(3), MaxLength(50)]
+        public string Username { get; set; } = "";
+        [Required, MinLength(6), MaxLength(100)]
+        public string Password { get; set; } = "";
+    }
+
+    public class RegisterRequest
+    {
+        [Required, MinLength(3), MaxLength(50)]
+        public string Username { get; set; } = "";
+        [Required, MinLength(6), MaxLength(100)]
+        public string Password { get; set; } = "";
+    }
+
+    public class LoginRequest
+    {
+        [Required]
+        public string Username { get; set; } = "";
+        [Required]
+        public string Password { get; set; } = "";
+    }
+}
+
+backend/Services/AppStore.cs
+
+using backend.Models;
+
+namespace backend.Services
+{
+    public class AppStore
+    {
+        public List<User> Users { get; } = new();
+        public Dictionary<Guid, List<Project>> ProjectsByUser { get; } = new();
+        public Dictionary<Guid, List<TaskItem>> TasksByProject { get; } = new();
+
+        public List<Project> GetUserProjects(Guid userId)
+        {
+            if (!ProjectsByUser.ContainsKey(userId)) ProjectsByUser[userId] = new List<Project>();
+            return ProjectsByUser[userId];
+        }
+
+        public List<TaskItem> GetProjectTasks(Guid projectId)
+        {
+            if (!TasksByProject.ContainsKey(projectId)) TasksByProject[projectId] = new List<TaskItem>();
+            return TasksByProject[projectId];
+        }
+    }
+}
+
+backend/Services/JwtTokenService.cs
+
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
+using Microsoft.IdentityModel.Tokens;
+
+namespace backend.Services
+{
+    public class JwtTokenService
+    {
+        private readonly IConfiguration _config;
+        public JwtTokenService(IConfiguration config) { _config = config; }
+
+        public string IssueToken(Guid userId, string username)
+        {
+            var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_config["Jwt:Key"] ?? "dev-secret-key-change"));
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var claims = new[]
+            {
+                new Claim(ClaimTypes.NameIdentifier, userId.ToString()),
+                new Claim(ClaimTypes.Name, username)
+            };
+
+            var token = new JwtSecurityToken(
+                claims: claims,
+                expires: DateTime.UtcNow.AddHours(8),
+                signingCredentials: creds
+            );
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+    }
+}
+
+backend/Controllers/AuthController.cs
+
+using Microsoft.AspNetCore.Mvc;
+using backend.Models;
+using backend.Services;
+
+namespace backend.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    public class AuthController : ControllerBase
+    {
+        private readonly AppStore _store;
+        private readonly JwtTokenService _jwt;
+
+        public AuthController(AppStore store, JwtTokenService jwt)
+        {
+            _store = store; _jwt = jwt;
+        }
+
+        [HttpPost("register")]
+        public IActionResult Register([FromBody] RegisterRequest req)
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            if (_store.Users.Any(u => u.Username == req.Username)) return Conflict("Username taken");
+            var user = new User { Username = req.Username, Password = req.Password };
+            _store.Users.Add(user);
+            var token = _jwt.IssueToken(user.Id, user.Username);
+            return Ok(new { token });
+        }
+
+        [HttpPost("login")]
+        public IActionResult Login([FromBody] LoginRequest req)
+        {
+            var user = _store.Users.FirstOrDefault(u => u.Username == req.Username && u.Password == req.Password);
+            if (user == null) return Unauthorized();
+            var token = _jwt.IssueToken(user.Id, user.Username);
+            return Ok(new { token });
+        }
+    }
+}
+
+backend/Controllers/ProjectsController.cs
+
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using backend.Models;
+using backend.Services;
+using System.Security.Claims;
+
+namespace backend.Controllers
+{
+    [ApiController]
+    [Route("api/[controller]")]
+    [Authorize]
+    public class ProjectsController : ControllerBase
+    {
+        private readonly AppStore _store;
+        public ProjectsController(AppStore store) { _store = store; }
+
+        private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        [HttpGet]
+        public IActionResult Get()
+        {
+            var projects = _store.GetUserProjects(CurrentUserId());
+            return Ok(projects);
+        }
+
+        [HttpPost]
+        public IActionResult Create([FromBody] Project project)
+        {
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            project.OwnerId = CurrentUserId();
+            project.Id = Guid.NewGuid();
+            _store.GetUserProjects(project.OwnerId).Add(project);
+            return Ok(project);
+        }
+
+        [HttpGet("{id}")]
+        public IActionResult GetById(Guid id)
+        {
+            var project = _store.GetUserProjects(CurrentUserId()).FirstOrDefault(p => p.Id == id);
+            if (project == null) return NotFound();
+            var tasks = _store.GetProjectTasks(project.Id);
+            return Ok(new { project, tasks });
+        }
+
+        [HttpDelete("{id}")]
+        public IActionResult Delete(Guid id)
+        {
+            var list = _store.GetUserProjects(CurrentUserId());
+            var p = list.FirstOrDefault(x => x.Id == id);
+            if (p == null) return NotFound();
+            list.Remove(p);
+            _store.TasksByProject.Remove(id);
+            return NoContent();
+        }
+    }
+}
+
+backend/Controllers/TasksController.cs
+
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using backend.Models;
+using backend.Services;
+using System.Security.Claims;
+
+namespace backend.Controllers
+{
+    [ApiController]
+    [Route("api")]
+    [Authorize]
+    public class TasksController : ControllerBase
+    {
+        private readonly AppStore _store;
+        public TasksController(AppStore store) { _store = store; }
+        private Guid CurrentUserId() => Guid.Parse(User.FindFirstValue(ClaimTypes.NameIdentifier)!);
+
+        [HttpPost("projects/{projectId}/tasks")]
+        public IActionResult Create(Guid projectId, [FromBody] TaskItem task)
+        {
+            var project = _store.GetUserProjects(CurrentUserId()).FirstOrDefault(p => p.Id == projectId);
+            if (project == null) return NotFound("Project not found");
+
+            if (!ModelState.IsValid) return BadRequest(ModelState);
+            task.Id = Guid.NewGuid();
+            task.ProjectId = projectId;
+            _store.GetProjectTasks(projectId).Add(task);
+            return Ok(task);
+        }
+
+        [HttpPut("tasks/{taskId}")]
+        public IActionResult Update(Guid taskId, [FromBody] TaskItem updated)
+        {
+            var tasksEntry = _store.TasksByProject.FirstOrDefault(kv => kv.Value.Any(t => t.Id == taskId));
+            if (tasksEntry.Key == Guid.Empty) return NotFound();
+
+            var project = _store.GetUserProjects(CurrentUserId()).FirstOrDefault(p => p.Id == tasksEntry.Key);
+            if (project == null) return Forbid();
+
+            var list = tasksEntry.Value;
+            var t = list.First(x => x.Id == taskId);
+            t.Title = updated.Title;
+            t.Description = updated.Description;
+            t.DueDate = updated.DueDate;
+            t.IsCompleted = updated.IsCompleted;
+            t.Dependencies = updated.Dependencies ?? new List<Guid>();
+            return Ok(t);
+        }
+
+        [HttpDelete("tasks/{taskId}")]
+        public IActionResult Delete(Guid taskId)
+        {
+            var tasksEntry = _store.TasksByProject.FirstOrDefault(kv => kv.Value.Any(t => t.Id == taskId));
+            if (tasksEntry.Key == Guid.Empty) return NotFound();
+
+            var project = _store.GetUserProjects(CurrentUserId()).FirstOrDefault(p => p.Id == tasksEntry.Key);
+            if (project == null) return Forbid();
+
+            var list = tasksEntry.Value;
+            list.RemoveAll(t => t.Id == taskId);
+            return NoContent();
+        }
+    }
+}
+
+backend/Controllers/ScheduleController.cs
+
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using backend.Services;
+
+namespace backend.Controllers
+{
+    [ApiController]
+    [Route("api/projects/{projectId}/schedule")]
+    [Authorize]
+    public class ScheduleController : ControllerBase
+    {
+        private readonly AppStore _store;
+        public ScheduleController(AppStore store) { _store = store; }
+
+        [HttpPost]
+        public IActionResult Recommend(Guid projectId)
+        {
+            var tasks = _store.GetProjectTasks(projectId);
+            var indegree = new Dictionary<Guid,int>();
+            var graph = new Dictionary<Guid,List<Guid>>();
+            foreach (var t in tasks)
+            {
+                indegree[t.Id] = indegree.GetValueOrDefault(t.Id, 0);
+                foreach (var d in t.Dependencies)
+                {
+                    if (!graph.ContainsKey(d)) graph[d] = new List<Guid>();
+                    graph[d].Add(t.Id);
+                    indegree[t.Id] = indegree.GetValueOrDefault(t.Id, 0) + 1;
+                }
+            }
+
+            var queue = new List<Guid>(indegree.Where(kv => kv.Value == 0).Select(kv => kv.Key));
+            var order = new List<Guid>();
+            while (queue.Count > 0)
+            {
+                // prefer earlier due dates when ties
+                queue = queue.OrderBy(id => tasks.First(x => x.Id == id).DueDate ?? DateTime.MaxValue).ToList();
+                var v = queue[0]; queue.RemoveAt(0);
+                order.Add(v);
+                if (graph.TryGetValue(v, out var next))
+                {
+                    foreach (var n in next)
+                    {
+                        indegree[n]--;
+                        if (indegree[n] == 0) queue.Add(n);
+                    }
+                }
+            }
+
+            var scheduled = order.Select(id => tasks.First(t => t.Id == id))
+                                 .Select(t => new { t.Id, t.Title, t.DueDate })
+                                 .ToList();
+            return Ok(new { recommendedOrder = scheduled });
+        }
+    }
+}
+
+
+
+FRONTEND (React + TypeScript, Vite)
+frontend/package.json
+
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-router-dom": "^6.26.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.10"
+  }
+}
+
+frontend/tsconfig.json
+
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "useDefineForClassFields": true,
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "skipLibCheck": true,
+    "moduleResolution": "Bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "react-jsx",
+    "strict": true
+  },
+  "include": ["src"]
+}
+
+frontend/vite.config.ts
+
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+export default defineConfig({
+  plugins: [react()]
+});
+
+frontend/index.html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Mini Project Manager</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+
+frontend/src/types.ts
+
+export type Project = {
+  id: string;
+  title: string;
+  description?: string | null;
+  createdAt: string;
+};
+
+export type TaskItem = {
+  id: string;
+  projectId: string;
+  title: string;
+  description?: string | null;
+  dueDate?: string | null;
+  isCompleted: boolean;
+  dependencies: string[];
+};
+
+frontend/src/api.ts
+
+import axios from "axios";
+
+const API_URL = import.meta.env.VITE_API_URL ?? "https://localhost:5001/api";
+
+export const api = axios.create({ baseURL: API_URL });
+
+export function setAuth(token: string | null) {
+  if (token) {
+    api.defaults.headers.common.Authorization = `Bearer ${token}`;
+    localStorage.setItem("token", token);
+  } else {
+    delete api.defaults.headers.common.Authorization;
+    localStorage.removeItem("token");
+  }
+}
+
+const bootToken = localStorage.getItem("token");
+if (bootToken) setAuth(bootToken);
+
+
+frontend/src/auth/AuthContext.tsx
+import React, { createContext, useContext, useState } from "react";
+import { api, setAuth } from "../api";
+
+type AuthCtx = {
+  token: string | null;
+  login: (u: string, p: string) => Promise<void>;
+  register: (u: string, p: string) => Promise<void>;
+  logout: () => void;
+};
+const Ctx = createContext<AuthCtx>(null as any);
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const [token, setToken] = useState<string | null>(localStorage.getItem("token"));
+
+  async function login(username: string, password: string) {
+    const { data } = await api.post("/auth/login", { username, password });
+    setAuth(data.token); setToken(data.token);
+  }
+  async function register(username: string, password: string) {
+    const { data } = await api.post("/auth/register", { username, password });
+    setAuth(data.token); setToken(data.token);
+  }
+  function logout() { setAuth(null); setToken(null); }
+
+  return <Ctx.Provider value={{ token, login, register, logout }}>{children}</Ctx.Provider>;
+}
+
+export function useAuth() { return useContext(Ctx); }
+
+frontend/src/pages/Login.tsx
+
+import React, { useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
+
+export default function Login() {
+  const { login } = useAuth();
+  const nav = useNavigate();
+  const [u, setU] = useState(""); const [p, setP] = useState(""); const [e, setE] = useState("");
+
+  async function submit(evn: React.FormEvent) {
+    evn.preventDefault();
+    try { await login(u, p); nav("/"); } catch { setE("Invalid credentials"); }
+  }
+
+  return (
+    <div style={{ maxWidth: 400, margin: "40px auto" }}>
+      <h2>Login</h2>
+      <form onSubmit={submit}>
+        <input placeholder="Username" value={u} onChange={e => setU(e.target.value)} />
+        <input placeholder="Password" type="password" value={p} onChange={e => setP(e.target.value)} />
+        <button type="submit">Login</button>
+      </form>
+      {e && <p style={{ color: "red" }}>{e}</p>}
+      <p>No account? <Link to="/register">Register</Link></p>
+    </div>
+  );
+}
+
+frontend/src/pages/Register.tsx
+
+import React, { useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { useAuth } from "../auth/AuthContext";
+
+export default function Register() {
+  const { register } = useAuth();
+  const nav = useNavigate();
+  const [u, setU] = useState(""); const [p, setP] = useState("");
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    await register(u, p);
+    nav("/");
+  }
+
+  return (
+    <div style={{ maxWidth: 400, margin: "40px auto" }}>
+      <h2>Register</h2>
+      <form onSubmit={submit}>
+        <input placeholder="Username" value={u} onChange={e => setU(e.target.value)} />
+        <input placeholder="Password" type="password" value={p} onChange={e => setP(e.target.value)} />
+        <button type="submit">Create account</button>
+      </form>
+      <p>Have an account? <Link to="/login">Login</Link></p>
+    </div>
+  );
+}
+
+frontend/src/pages/Dashboard.tsx
+
+import React, { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api";
+import { Project } from "../types";
+import { useAuth } from "../auth/AuthContext";
+
+export default function Dashboard() {
+  const { logout } = useAuth();
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [title, setTitle] = useState("");
+  const [desc, setDesc] = useState("");
+
+  async function load() {
+    const { data } = await api.get<Project[]>("/projects");
+    setProjects(data);
+  }
+
+  async function addProject() {
+    if (!title.trim()) return;
+    const { data } = await api.post<Project>("/projects", { title, description: desc });
+    setProjects([...projects, data]);
+    setTitle(""); setDesc("");
+  }
+
+  async function remove(id: string) {
+    await api.delete(`/projects/${id}`);
+    setProjects(projects.filter(p => p.id !== id));
+  }
+
+  useEffect(() => { load(); }, []);
+
+  return (
+    <div style={{ maxWidth: 720, margin: "24px auto" }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <h2>Your Projects</h2>
+        <button onClick={logout}>Logout</button>
+      </div>
+      <div>
+        <input placeholder="Title" value={title} onChange={e => setTitle(e.target.value)} />
+        <input placeholder="Description" value={desc} onChange={e => setDesc(e.target.value)} />
+        <button onClick={addProject}>Add</button>
+      </div>
+      <ul>
+        {projects.map(p => (
+          <li key={p.id} style={{ margin: "8px 0" }}>
+            <Link to={`/projects/${p.id}`}>{p.title}</Link>
+            <button style={{ marginLeft: 12 }} onClick={() => remove(p.id)}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+frontend/src/pages/Project.tsx
+
+import React, { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
+import { api } from "../api";
+import { Project, TaskItem } from "../types";
+
+type ProjectResponse = { project: Project; tasks: TaskItem[] };
+
+export default function ProjectPage() {
+  const { id } = useParams();
+  const [project, setProject] = useState<Project | null>(null);
+  const [tasks, setTasks] = useState<TaskItem[]>([]);
+  const [title, setTitle] = useState("");
+  const [due, setDue] = useState("");
+
+  async function load() {
+    const { data } = await api.get<ProjectResponse>(`/projects/${id}`);
+    setProject(data.project);
+    setTasks(data.tasks);
+  }
+
+  async function addTask() {
+    if (!title.trim()) return;
+    const { data } = await api.post<TaskItem>(`/projects/${id}/tasks`, {
+      title,
+      description: "",
+      isCompleted: false,
+      dueDate: due || null,
+      dependencies: []
+    });
+    setTasks([...tasks, data]);
+    setTitle(""); setDue("");
+  }
+
+  async function toggle(t: TaskItem) {
+    const { data } = await api.put<TaskItem>(`/tasks/${t.id}`, { ...t, isCompleted: !t.isCompleted });
+    setTasks(tasks.map(x => x.id === t.id ? data : x));
+  }
+
+  async function remove(taskId: string) {
+    await api.delete(`/tasks/${taskId}`);
+    setTasks(tasks.filter(t => t.id !== taskId));
+  }
+
+  async function schedule() {
+    const { data } = await api.post<{ recommendedOrder: { id: string; title: string; dueDate?: string }[] }>(`/projects/${id}/schedule`);
+    alert("Recommended order:\n" + data.recommendedOrder.map(x => x.title).join(" → "));
+  }
+
+  const sorted = useMemo(() =>
+    [...tasks].sort((a, b) => (a.dueDate ? new Date(a.dueDate).getTime() : 9e15) - (b.dueDate ? new Date(b.dueDate).getTime() : 9e15))
+  , [tasks]);
+
+  useEffect(() => { load(); }, [id]);
+
+  if (!project) return <div style={{ maxWidth: 720, margin: "24px auto" }}>Loading...</div>;
+
+  return (
+    <div style={{ maxWidth: 720, margin: "24px auto" }}>
+      <h2>{project.title}</h2>
+      <div>
+        <input placeholder="Task title" value={title} onChange={e => setTitle(e.target.value)} />
+        <input type="date" value={due} onChange={e => setDue(e.target.value)} />
+        <button onClick={addTask}>Add Task</button>
+        <button style={{ marginLeft: 12 }} onClick={schedule}>Schedule</button>
+      </div>
+      <ul>
+        {sorted.map(t => (
+          <li key={t.id} style={{ margin: "8px 0", display: "flex", alignItems: "center" }}>
+            <input type="checkbox" checked={t.isCompleted} onChange={() => toggle(t)} />
+            <span style={{ marginLeft: 8, textDecoration: t.isCompleted ? "line-through" : "" }}>
+              {t.title}{t.dueDate ? ` (due ${t.dueDate})` : ""}
+            </span>
+            <button style={{ marginLeft: "auto" }} onClick={() => remove(t.id)}>Delete</button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+frontend/src/App.tsx
+
+import React from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
+import Login from "./pages/Login";
+import Register from "./pages/Register";
+import Dashboard from "./pages/Dashboard";
+import ProjectPage from "./pages/Project";
+
+function Guard({ children }: { children: JSX.Element }) {
+  const { token } = useAuth();
+  return token ? children : <Navigate to="/login" replace />;
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route path="/register" element={<Register />} />
+          <Route path="/" element={<Guard><Dashboard /></Guard>} />
+          <Route path="/projects/:id" element={<Guard><ProjectPage /></Guard>} />
+        </Routes>
+      </BrowserRouter>
+    </AuthProvider>
+  );
+}
+
+frontend/src/main.tsx
+
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+
+ReactDOM.createRoot(document.getElementById("root")!).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+);
+
+
+
+
+
